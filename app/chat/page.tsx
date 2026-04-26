@@ -1,207 +1,165 @@
-"use client";
+'use client';
 
-import { useEffect, useState, useRef } from "react";
-import { supabase } from "../../lib/supabase";
+import { useState, useEffect } from 'react';
+import { supabase } from '@/lib/supabase';
+import { useRouter } from 'next/navigation';
 
 export default function ChatPage() {
-  const [isClient, setIsClient] = useState(false);
-  const [messages, setMessages] = useState<any[]>([]);
-  const [inputText, setInputText] = useState("");
-  const [myNickname, setMyNickname] = useState("");
-  const [myRole, setMyRole] = useState("user");
-  const [onlineUsers, setOnlineUsers] = useState<string[]>([]);
-  const [allUsers, setAllUsers] = useState<any[]>([]);
-  const [isUploading, setIsUploading] = useState(false);
-  
-  const channelRef = useRef<any>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [users, setUsers] = useState<any[]>([]);
+  const [selectedUser, setSelectedUser] = useState<any>(null); // 클릭한 사용자 정보 저장
+  const [newNickname, setNewNickname] = useState('');
+  const [loading, setLoading] = useState(true);
+  const router = useRouter();
 
   useEffect(() => {
-    setIsClient(true);
-
-    const setup = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const nick = (user.user_metadata?.display_name || user.email?.split("@")[0] || "익명").trim();
-      setMyNickname(nick);
-
-      // 1. 프로필 정보 로드
-      const { data: profiles } = await supabase.from("profiles").select("nickname, role");
-      if (profiles) {
-        setAllUsers(profiles.map(p => ({ ...p, nickname: p.nickname.trim() })));
-        const myProfile = profiles.find(p => p.nickname.trim() === nick);
-        if (myProfile) setMyRole(myProfile.role);
-      }
-
-      // 2. 초기 메시지 로드
-      const { data } = await supabase.from("messages").select("*").order("created_at", { ascending: true });
-      if (data) setMessages(data);
-
-      // 3. 실시간 채널 및 Presence 설정
-      const channel = supabase.channel("global_chat", {
-        config: { presence: { key: nick } }
-      });
-
-      channel
-        .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, (p) => {
-          if (p.eventType === "INSERT") setMessages(prev => [...prev, p.new]);
-          if (p.eventType === "DELETE") setMessages(prev => prev.filter(m => m.id !== p.old.id));
-        })
-        .on("presence", { event: "sync" }, () => {
-          const state = channel.presenceState();
-          const names = Object.keys(state).map(k => k.trim());
-          setOnlineUsers([...new Set(names)]);
-        })
-        .subscribe(async (status) => {
-          if (status === "SUBSCRIBED") {
-            await channel.track({ online_at: new Date().toISOString() });
-          }
-        });
-
-      channelRef.current = channel;
-    };
-
-    setup();
-    return () => { if (channelRef.current) supabase.removeChannel(channelRef.current); };
+    fetchUserAndProfiles();
   }, []);
 
-  // 이미지 업로드 로직
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // 유저 정보 및 전체 프로필 가져오기
+  const fetchUserAndProfiles = async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return router.push('/');
 
-    try {
-      setIsUploading(true);
-      const fileExt = file.name.split('.').pop();
-      const fileName = `${Math.random()}.${fileExt}`;
-      
-      const { error: uploadError } = await supabase.storage
-        .from('chat-images')
-        .upload(fileName, file);
+    // 내 상세 프로필(is_admin 포함) 가져오기
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', user.id)
+      .single();
 
-      if (uploadError) throw uploadError;
+    setCurrentUser({ ...user, ...profile });
 
-      const { data: { publicUrl } } = supabase.storage
-        .from('chat-images')
-        .getPublicUrl(fileName);
+    // 전체 유저 목록 가져오기
+    const { data: allUsers } = await supabase.from('profiles').select('*');
+    if (allUsers) setUsers(allUsers);
+    setLoading(false);
+  };
 
-      await supabase.from("messages").insert([{ 
-        content: `[IMAGE]:${publicUrl}`, 
-        sender_nickname: myNickname, 
-        room_id: "1" 
-      }]);
+  // 1. 로그아웃 기능
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push('/');
+  };
 
-    } catch (error: any) {
-      alert("업로드 실패: " + error.message);
-    } finally {
-      setIsUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+  // 2. 닉네임 변경 기능
+  const handleUpdateNickname = async () => {
+    if (!newNickname.trim()) return alert('닉네임을 입력해주세요.');
+    
+    const { error } = await supabase
+      .from('profiles')
+      .update({ nickname: newNickname })
+      .eq('id', currentUser.id);
+
+    if (error) {
+      alert('변경 실패: ' + error.message);
+    } else {
+      alert('닉네임이 변경되었습니다!');
+      window.location.reload(); // 변경사항 반영을 위해 새로고침
     }
   };
 
-  const deleteMessage = async (id: string) => {
-    if (myRole !== "admin") return;
-    await supabase.from("messages").delete().eq("id", id);
+  // 3. 관리자 액션 (추방, 정지, 뮤트)
+  const handleAdminAction = async (type: 'kick' | 'ban' | 'mute', targetId: string) => {
+    if (!currentUser?.is_admin) return alert('관리자 권한이 없습니다.');
+
+    let updateData = {};
+    if (type === 'ban') {
+      updateData = { is_banned: true };
+    } else if (type === 'mute') {
+      // 현재 시간으로부터 10분 뒤까지 채팅 금지
+      const muteUntil = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+      updateData = { mute_until: muteUntil };
+    } else if (type === 'kick') {
+      // 추방은 사실상 접속을 끊는 것이므로 여기서는 간단히 안내만 하거나 
+      // 특정 테이블에서 제거하는 로직을 넣을 수 있습니다.
+      alert('추방 기능은 실시간 세션과 연동이 필요합니다. 현재는 UI만 구현되었습니다.');
+      return;
+    }
+
+    const { error } = await supabase
+      .from('profiles')
+      .update(updateData)
+      .eq('id', targetId);
+
+    if (error) {
+      alert('작업 실패: ' + error.message);
+    } else {
+      alert('처리가 완료되었습니다.');
+      setSelectedUser(null);
+      fetchUserAndProfiles(); // 목록 새로고침
+    }
   };
 
-  useEffect(() => {
-    if (isClient) scrollRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isClient]);
-
-  // 하이드레이션 에러 방지 (클라이언트 렌더링 강제)
-  if (!isClient) return <div className="h-screen bg-[#313338]" />;
+  if (loading) return <div className="flex h-screen items-center justify-center bg-gray-900 text-white">로딩 중...</div>;
 
   return (
-    <div className="flex h-screen bg-[#313338] text-[#dbdee1] overflow-hidden" suppressHydrationWarning>
-      {/* 사이드바 */}
-      <div className="w-64 bg-[#2b2d31] flex flex-col border-r border-[#1e1f22] shrink-0">
-        <div className="p-4 font-bold text-white border-b border-[#1e1f22]">승기베스트</div>
-        <div className="flex-1 overflow-y-auto p-3">
-          <div className="text-xs font-bold text-[#949ba4] px-2 py-2 uppercase">온라인 — {onlineUsers.length}</div>
-          {allUsers.filter(u => onlineUsers.includes(u.nickname)).map((u, i) => (
-            <div key={`on-${i}`} className="flex items-center gap-3 px-2 py-1.5 rounded-md hover:bg-[#35373c]">
-              <div className="w-8 h-8 bg-[#5865f2] rounded-full flex items-center justify-center text-[10px] font-bold text-white relative shrink-0">
-                {u.nickname[0]}
-                <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-[#23a55a] border-2 border-[#2b2d31] rounded-full"></div>
-              </div>
-              <div className="text-sm truncate font-medium flex items-center gap-1">
-                {u.nickname} {u.role === "admin" && "👑"}
-              </div>
-            </div>
-          ))}
-          <div className="text-xs font-bold text-[#949ba4] px-2 py-2 mt-6 uppercase">오프라인</div>
-          {allUsers.filter(u => !onlineUsers.includes(u.nickname)).map((u, i) => (
-            <div key={`off-${i}`} className="flex items-center gap-3 px-2 py-1.5 opacity-50 grayscale transition-opacity">
-              <div className="w-8 h-8 bg-[#4e5058] rounded-full flex items-center justify-center text-[10px] font-bold shrink-0">{u.nickname[0]}</div>
-              <div className="text-sm truncate flex items-center gap-1">{u.nickname} {u.role === "admin" && "👑"}</div>
-            </div>
-          ))}
-        </div>
-        <div className="p-2 bg-[#232428] flex items-center gap-3 border-t border-[#1e1f22]">
-          <div className="w-8 h-8 bg-[#eb459e] rounded-full flex items-center justify-center font-bold text-white uppercase shrink-0">{myNickname?.[0]}</div>
-          <div className="flex-1 min-w-0 font-bold text-white truncate">{myNickname} {myRole === "admin" && "👑"}</div>
-        </div>
-      </div>
-
-      {/* 메인 채팅 섹션 */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <div className="h-12 border-b border-[#1e1f22] flex items-center px-4 font-bold text-white shadow-sm"># 전체 채팅방</div>
-        
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {messages.map((m) => (
-            <div key={m.id} className="flex gap-4 px-4 py-1 hover:bg-[#2e3035] rounded-lg group relative transition-colors">
-              <div className="w-10 h-10 bg-[#4e5058] rounded-full flex items-center justify-center font-bold text-white uppercase shrink-0">{m.sender_nickname?.[0]}</div>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="font-bold text-white">{m.sender_nickname}</span>
-                  <span className="text-[10px] text-[#949ba4]" suppressHydrationWarning>{new Date(m.created_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</span>
-                </div>
-                {m.content.startsWith("[IMAGE]:") ? (
-                  <img src={m.content.split("[IMAGE]:")[1]} alt="img" className="mt-2 max-w-[300px] rounded-lg border border-[#1e1f22] hover:scale-[1.01] transition-transform cursor-pointer" />
-                ) : (
-                  <p className="text-[#dbdee1] break-all leading-relaxed">{m.content}</p>
-                )}
-              </div>
-              {myRole === "admin" && (
-                <button onClick={() => deleteMessage(m.id)} className="hidden group-hover:block absolute right-4 top-2 text-xs text-[#ed4245] border border-[#ed4245] px-2 py-1 rounded hover:bg-[#ed4245] hover:text-white transition-all">삭제</button>
-              )}
-            </div>
-          ))}
-          <div ref={scrollRef} />
+    <div className="flex h-screen bg-gray-900 text-white">
+      {/* 왼쪽 사이드바: 사용자 목록 */}
+      <div className="w-72 flex flex-col border-r border-gray-700 bg-gray-800 p-4">
+        <div className="mb-6 flex items-center justify-between">
+          <h2 className="text-xl font-bold">채팅방</h2>
+          <button onClick={handleLogout} className="rounded bg-red-600 px-3 py-1 text-xs hover:bg-red-700">로그아웃</button>
         </div>
 
-        {/* 하단 입력바 (수정됨) */}
-        <div className="p-4 bg-[#313338]">
-          <div className="bg-[#383a40] rounded-xl flex items-center px-4 gap-3">
-            <button 
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="text-[#b5bac1] hover:text-white text-2xl font-light p-1"
-              disabled={isUploading}
-            >
-              {isUploading ? "..." : "+"}
-            </button>
-            <input type="file" hidden ref={fileInputRef} accept="image/*" onChange={handleImageUpload} />
-            
-            <form onSubmit={async (e) => {
-              e.preventDefault();
-              if (!inputText.trim()) return;
-              await supabase.from("messages").insert([{ content: inputText.trim(), sender_nickname: myNickname, room_id: "1" }]);
-              setInputText("");
-            }} className="flex-1">
-              <input 
-                type="text" 
-                className="w-full bg-transparent py-4 outline-none text-[#dbdee1] text-sm" 
-                placeholder="#전체 채팅방에 메시지 보내기" 
-                value={inputText} 
-                onChange={(e) => setInputText(e.target.value)} 
-              />
-            </form>
+        {/* 내 프로필 설정 */}
+        <div className="mb-8 rounded-lg bg-gray-700 p-3">
+          <p className="text-xs text-gray-400 mb-2">내 닉네임 설정</p>
+          <div className="flex gap-2">
+            <input 
+              className="w-full bg-gray-600 p-1 text-sm rounded outline-none"
+              placeholder={currentUser?.nickname || "닉네임 입력"}
+              onChange={(e) => setNewNickname(e.target.value)}
+            />
+            <button onClick={handleUpdateNickname} className="text-xs text-blue-400 hover:text-blue-300">변경</button>
           </div>
         </div>
+
+        {/* 접속자 리스트 */}
+        <div className="flex-1 overflow-y-auto">
+          <h3 className="mb-3 text-sm font-semibold text-gray-400">사용자 목록 (클릭 시 관리)</h3>
+          <ul className="space-y-2">
+            {users.map((user) => (
+              <li 
+                key={user.id} 
+                onClick={() => setSelectedUser(user)}
+                className="flex cursor-pointer items-center justify-between rounded p-2 hover:bg-gray-700 transition"
+              >
+                <span className={user.is_banned ? "text-gray-500 line-through" : ""}>
+                  {user.nickname || user.email.split('@')[0]}
+                </span>
+                {user.is_admin && <span className="rounded bg-yellow-600 px-1 text-[10px]">ADMIN</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
       </div>
+
+      {/* 중앙: 채팅 영역 (기존 채팅 코드를 여기에 유지하세요) */}
+      <div className="flex flex-1 flex-col items-center justify-center">
+        <p className="text-gray-500">채팅 메시지 영역이 여기에 들어갑니다.</p>
+      </div>
+
+      {/* 관리자 팝업 모달 */}
+      {selectedUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-70">
+          <div className="w-80 rounded-lg bg-gray-800 p-6 shadow-2xl">
+            <h3 className="mb-2 text-xl font-bold">{selectedUser.nickname || selectedUser.email}</h3>
+            <p className="mb-6 text-sm text-gray-400">사용자 관리 메뉴</p>
+            
+            <div className="flex flex-col gap-3">
+              {currentUser?.is_admin && (
+                <>
+                  <button onClick={() => handleAdminAction('mute', selectedUser.id)} className="w-full rounded bg-yellow-600 py-2 hover:bg-yellow-700">10분 채팅 금지</button>
+                  <button onClick={() => handleAdminAction('ban', selectedUser.id)} className="w-full rounded bg-orange-600 py-2 hover:bg-orange-700">계정 영구 정지</button>
+                  <button onClick={() => handleAdminAction('kick', selectedUser.id)} className="w-full rounded bg-red-600 py-2 hover:bg-red-700">강제 추방</button>
+                </>
+              )}
+              <button onClick={() => setSelectedUser(null)} className="mt-2 w-full py-2 text-gray-400 hover:text-white">닫기</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,81 +1,105 @@
-"use client";
+'use client';
 
-import { useState, useEffect } from "react";
-import { supabase } from "../lib/supabase";
+import { useState } from 'react';
+import { supabase } from '@/lib/supabase'; // 경로가 다르면 수정하세요
+import { useRouter } from 'next/navigation';
 
-export default function AuthPage() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [nickname, setNickname] = useState("");
+export default function LoginPage() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
-  const [mounted, setMounted] = useState(false);
+  const router = useRouter();
 
-  useEffect(() => { setMounted(true); }, []);
-
-  const handleAuth = async (e: React.FormEvent) => {
+  // 1. 회원가입 함수 (중복 체크 로직 포함)
+  const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (loading) return;
+    if (!email || !password) return alert('이메일과 비밀번호를 입력해주세요.');
+    
     setLoading(true);
 
-    try {
-      if (authMode === "signup") {
-        const { data: existingNickname } = await supabase
-          .from("messages")
-          .select("sender_nickname")
-          .eq("sender_nickname", nickname)
-          .limit(1);
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+    });
 
-        if (existingNickname && existingNickname.length > 0) {
-          alert("이미 사용 중인 닉네임입니다!");
-          setLoading(false);
-          return;
-        }
-
-        const { error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: { data: { display_name: nickname } }
-        });
-
-        if (error) throw error;
-        alert("가입 성공! 이제 로그인해 주세요.");
-        setAuthMode("login");
+    if (error) {
+      // 이메일 중복 시 발생하는 에러 메시지 처리
+      if (error.message.includes("already registered") || error.status === 422) {
+        alert("이미 가입된 이메일입니다. 로그인을 해주세요!");
       } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-        window.location.assign("/chat");
+        alert("가입 중 에러 발생: " + error.message);
       }
-    } catch (err: any) {
-      alert(err.message === "User already registered" ? "이미 가입된 이메일입니다." : err.message);
-    } finally {
-      setLoading(false);
+    } else if (data.user) {
+      // Supabase 설정에 따라 바로 가입되거나 인증 메일이 발송됨
+      alert("회원가입 신청이 완료되었습니다!");
     }
+
+    setLoading(false);
   };
 
-  if (!mounted) return null;
+  // 2. 로그인 함수
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || !password) return alert('이메일과 비밀번호를 입력해주세요.');
+
+    setLoading(true);
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (error) {
+      alert("로그인 실패: " + error.message);
+    } else if (data.user) {
+      router.push('/chat'); // 채팅방으로 이동
+    }
+    setLoading(false);
+  };
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-[#1e1f22] text-[#dbdee1]">
-      <div className="bg-[#2b2d31] p-10 rounded-2xl shadow-2xl w-[420px] flex flex-col items-center">
-        <div className="w-14 h-14 bg-[#5865f2] rounded-2xl flex items-center justify-center text-white font-black text-xl mb-6 shadow-lg">RC</div>
-        <h1 className="text-2xl font-bold text-white mb-1">Realtime Chat</h1>
-        <p className="text-[#b5bac1] text-sm mb-8">로그인하거나 익명으로 입장하세요.</p>
+    <div className="flex min-h-screen items-center justify-center bg-gray-900 p-4">
+      <div className="w-full max-w-md rounded-lg bg-gray-800 p-8 shadow-lg">
+        <h1 className="mb-6 text-center text-3xl font-bold text-white">채팅 앱 로그인</h1>
+        
+        <form className="space-y-4">
+          <div>
+            <label className="block text-sm text-gray-400">이메일</label>
+            <input
+              type="email"
+              className="mt-1 w-full rounded border border-gray-700 bg-gray-700 p-2 text-white outline-none focus:border-blue-500"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="example@test.com"
+            />
+          </div>
+          
+          <div>
+            <label className="block text-sm text-gray-400">비밀번호</label>
+            <input
+              type="password"
+              className="mt-1 w-full rounded border border-gray-700 bg-gray-700 p-2 text-white outline-none focus:border-blue-500"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="********"
+            />
+          </div>
 
-        <div className="flex w-full bg-[#1e1f22] p-1 rounded-lg mb-6">
-          <button onClick={() => setAuthMode("login")} className={`flex-1 py-2 text-sm font-bold rounded-md transition-all ${authMode === "login" ? "bg-[#383a40] text-white shadow" : "text-[#949ba4]"}`}>로그인</button>
-          <button onClick={() => setAuthMode("signup")} className={`flex-1 py-2 text-sm font-bold rounded-md transition-all ${authMode === "signup" ? "bg-[#383a40] text-white shadow" : "text-[#949ba4]"}`}>회원가입</button>
-        </div>
-
-        <form onSubmit={handleAuth} className="w-full flex flex-col gap-4">
-          {authMode === "signup" && (
-            <input type="text" placeholder="닉네임" className="w-full p-3 rounded-lg bg-[#1e1f22] border-none outline-none focus:ring-2 focus:ring-[#5865f2] text-white" value={nickname} onChange={(e) => setNickname(e.target.value)} required />
-          )}
-          <input type="email" placeholder="이메일" className="w-full p-3 rounded-lg bg-[#1e1f22] border-none outline-none focus:ring-2 focus:ring-[#5865f2] text-white" value={email} onChange={(e) => setEmail(e.target.value)} required />
-          <input type="password" placeholder="비밀번호" className="w-full p-3 rounded-lg bg-[#1e1f22] border-none outline-none focus:ring-2 focus:ring-[#5865f2] text-white" value={password} onChange={(e) => setPassword(e.target.value)} required />
-          <button disabled={loading} className="w-full py-3 mt-2 bg-[#5865f2] hover:bg-[#4752c4] text-white font-bold rounded-lg transition-all shadow-lg active:scale-95 disabled:opacity-50">
-            {loading ? "처리 중..." : authMode === "login" ? "로그인" : "가입하기"}
-          </button>
+          <div className="flex gap-3 pt-2">
+            <button
+              onClick={handleLogin}
+              disabled={loading}
+              className="flex-1 rounded bg-blue-600 py-2 font-bold text-white transition hover:bg-blue-700 disabled:bg-gray-600"
+            >
+              {loading ? '처리 중...' : '로그인'}
+            </button>
+            <button
+              onClick={handleSignUp}
+              disabled={loading}
+              className="flex-1 rounded bg-green-600 py-2 font-bold text-white transition hover:bg-green-700 disabled:bg-gray-600"
+            >
+              회원가입
+            </button>
+          </div>
         </form>
       </div>
     </div>
